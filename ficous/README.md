@@ -46,7 +46,7 @@ Execução (desenvolvimento)
 ```
 npm run dev
 ```
-Por padrão, o Vite sobe em `http://localhost:5173`.
+Por padrão, o Vite sobe em `http://localhost:3000`.
 
 Convenções de Commit
 Adotar Conventional Commits em português. Exemplos:
