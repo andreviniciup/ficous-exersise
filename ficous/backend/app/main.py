@@ -1,17 +1,25 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
-from .database import engine, Base
+from .database import engine, Base, get_db_driver_info
 from .config import CORS_ORIGINS
 from .routers import health
-from .routers import disciplines, notes
+from .routers import disciplines, notes, upload, sage
+from .routers import flashcards, exercises, progress, library
+from .routers import admin
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Log simples do driver do banco para diagnóstico
+    try:
+        driver = get_db_driver_info()
+        print(f"[Ficous] Database driver: {driver}")
+    except Exception:
+        pass
     yield
 
 
@@ -34,9 +42,27 @@ app.add_middleware(
 )
 
 
+# Middleware simples de logging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as exc:
+        # Deixamos o handler global formatar a resposta
+        raise exc
+
+
 app.include_router(health.router, prefix="/ficous")
 app.include_router(disciplines.router)
 app.include_router(notes.router)
+app.include_router(upload.router)
+app.include_router(sage.router)
+app.include_router(flashcards.router)
+app.include_router(exercises.router)
+app.include_router(progress.router)
+app.include_router(library.router)
+app.include_router(admin.router)
 
 
 @app.exception_handler(Exception)
