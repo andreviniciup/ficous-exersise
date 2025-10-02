@@ -134,6 +134,7 @@ class ExerciseDetailOut(ExerciseOut):
 
 class ExerciseGenerateIn(BaseModel):
     note_id: Optional[UUID] = None
+    discipline_id: Optional[UUID] = None  # ADICIONAR ESTA LINHA
     raw_context: Optional[str] = Field(default=None, min_length=1)
     source_id: Optional[UUID] = None
     qty: int = Field(default=5, ge=1, le=20)

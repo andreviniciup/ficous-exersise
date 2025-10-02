@@ -170,7 +170,7 @@ class Summary(Base):
     discipline_id = Column(GUID(), ForeignKey("ficous_disciplines.id", ondelete="SET NULL"), nullable=True)
     note_id = Column(GUID(), ForeignKey("ficous_notes.id", ondelete="SET NULL"), nullable=True)
     text = Column(Text, nullable=False)
-    last_refresh_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class UserConceptStat(Base):

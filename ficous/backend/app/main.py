@@ -31,9 +31,34 @@ limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="Ficous API",
-    description="API do caderno digital Ficous",
-    version="0.1.0",
-    lifespan=lifespan
+    description="""
+    API do caderno digital Ficous
+    
+    ## Features Principais
+    
+    * **Sage**: Assistente IA com 3 níveis de resposta
+    * **Exercises**: Geração inteligente de questões (MCQ + Open)
+    * **Flashcards**: Sistema de repetição espaçada (SM-2)
+    * **RAG**: Busca semântica personalizada
+    
+    ## Exercises - Pipeline
+    
+    O sistema de Exercises usa um pipeline em 3 etapas:
+    1. **Pré-processamento**: Limpeza, extração de tópicos, validação
+    2. **Geração via IA**: OpenAI GPT-4o-mini com prompts otimizados
+    3. **Pós-processamento**: Validação, embeddings para abertas, thresholds adaptativos
+    
+    Avaliação semântica usa similaridade de cosseno (threshold: 0.65-0.75)
+    """,
+    version="0.2.0",  # Atualizar versão
+    lifespan=lifespan,
+    contact={
+        "name": "Ficous Team",
+        "email": "contato@ficous.com"
+    },
+    license_info={
+        "name": "MIT"
+    }
 )
 
 # Adicionar rate limiter à app
@@ -91,7 +116,7 @@ async def global_exception_handler(request, exc):
 async def root():
     return {
         "message": "Ficous API",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "docs": "/docs"
     }
 

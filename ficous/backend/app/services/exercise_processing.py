@@ -235,15 +235,21 @@ def evaluate_open_answer_semantic(
     
     score = max(0, min(10, score))
     
-    # Gerar feedback
+    # Gerar feedback MELHORADO
     if similarity >= similarity_threshold and not missing_concepts:
-        feedback = "Excelente resposta! Você cobriu os principais conceitos."
+        feedback = "✅ Excelente resposta! Você cobriu os principais conceitos."
     elif similarity >= similarity_threshold:
-        feedback = f"Boa resposta, mas considere mencionar: {', '.join(missing_concepts)}"
-    elif missing_concepts:
-        feedback = f"Sua resposta está no caminho certo, mas faltou abordar: {', '.join(missing_concepts)}"
+        feedback = f"✓ Boa resposta, mas considere aprofundar: {', '.join(missing_concepts[:2])}"
+    elif missing_concepts and similarity > 0.5:
+        feedback = f"⚠️ Sua resposta está no caminho certo, mas faltou abordar: {', '.join(missing_concepts)}"
+    elif similarity > 0.3:
+        feedback = "📚 Revise o conteúdo - você capturou algumas ideias, mas precisa aprofundar nos conceitos principais."
     else:
-        feedback = "Revise o conteúdo e tente novamente focando nos conceitos principais."
+        feedback = "❌ Resposta não está alinhada com o esperado. Revise o material e tente novamente."
+
+    # Adicionar dica personalizada
+    if missing_concepts:
+        feedback += f" | 💡 Dica: Mencione explicitamente '{missing_concepts[0]}' na sua resposta."
     
     return {
         "similarity": similarity,

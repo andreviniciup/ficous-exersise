@@ -22,6 +22,7 @@ limiter = Limiter(
 SAGE_ANSWER_LIMITS = [SAGE_RATE_LIMIT, SAGE_RATE_LIMIT_BURST]
 SAGE_PROCESS_LIMITS = ["5/minute"]
 SAGE_ADMIN_LIMITS = ["2/minute"]
+EXERCISE_GENERATE_LIMITS = ["3/minute", "15/hour"]  # Mais restritivo por ser custoso
 
 
 def get_user_rate_limit_key(request: Request) -> str:

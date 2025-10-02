@@ -12,10 +12,45 @@ from ..utils import extract_text_from_pdf_bytes
 from ..models import Source
 from ..services.embeddings import _get_embedding
 from sklearn.metrics.pairwise import cosine_similarity
+from ..middleware.rate_limiting import limiter
 import json
+import os
 
 
 router = APIRouter(prefix="/ficous/exercises", tags=["ficous-exercises"])
+
+
+@router.get("/health")
+def exercises_health_check(
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id)
+):
+    """Health check específico para exercises"""
+    try:
+        # Verificar se pipeline está funcionando
+        test_content = "Este é um teste simples com mais de cinquenta palavras para validar o pipeline de pré-processamento. O sistema deve extrair tópicos, validar entrada e preparar conteúdo para geração de questões de forma adequada e eficiente."
+        
+        from ..services.exercise_processing import preprocess_exercise_content
+        preprocessed = preprocess_exercise_content(test_content)
+        
+        # Contar exercises do usuário
+        exercises_count = db.query(models.Exercise).filter(
+            models.Exercise.user_id == user_id
+        ).count()
+        
+        return {
+            "success": True,
+            "health": {
+                "preprocessing_working": preprocessed["validation"]["valid"],
+                "user_exercises": exercises_count,
+                "embeddings_available": os.getenv("OPENAI_API_KEY") is not None
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 @router.post("/", response_model=schemas.ExerciseOut)
@@ -223,6 +258,7 @@ def grade_exercise(
     return schemas.ExerciseGradeOut(exercise_id=exercise_id, score=score_obj, items_results=results)
 
 @router.post("/generate", response_model=schemas.ExerciseOut)
+@limiter.limit("3/minute")  # ADICIONAR ESTA LINHA
 def generate_exercise(
     payload: schemas.ExerciseGenerateIn,
     db: Session = Depends(get_db),
@@ -299,6 +335,16 @@ def generate_exercise(
     # Adicionar tópicos extraídos ao prompt
     topics_hint = f" Tópicos identificados: {', '.join(topics)}." if topics else ""
     
+    # ADICIONAR VALIDAÇÃO DE TAMANHO
+    import os
+    estimated_tokens = len(clean_context.split()) + len(prompt.split())
+    MAX_TOKENS = int(os.getenv("SAGE_MAX_CONTEXT_CHARS", "16000")) // 4  # ~4 chars = 1 token
+
+    if estimated_tokens > MAX_TOKENS:
+        # Truncar contexto de forma inteligente
+        max_context_words = MAX_TOKENS - len(prompt.split()) - 500  # margem de segurança
+        clean_context = " ".join(clean_context.split()[:max_context_words])
+    
     prompt = (
         f"Gere {qty} questões (kind={kind}, difficulty={difficulty}, "
         f"pattern_mode={pattern_mode}, closed_format={payload.closed_format})"
@@ -365,13 +411,18 @@ def generate_exercise(
         
     except Exception as e:
         # Fallback total em caso de erro
+        # ADICIONAR LOG DO ERRO
+        import logging
+        logger = logging.getLogger("ficous.exercises")
+        logger.error(f"Erro na geração de exercícios: {e}", exc_info=True)
+        
         final_items = [{
             "question": "Explique os conceitos principais do conteúdo fornecido.",
             "kind": "open",
             "answer_json": {
                 "model_answer": "",
-                "key_concepts": topics[:3] if topics else [],
-                "meta": {"difficulty": difficulty, "error_fallback": True}
+                "key_concepts": topics[:3] if topics else ["conceito1", "conceito2"],
+                "meta": {"difficulty": difficulty, "error_fallback": True, "error": str(e)}
             }
         }]
     
