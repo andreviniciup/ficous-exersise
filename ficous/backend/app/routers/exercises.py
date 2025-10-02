@@ -244,11 +244,20 @@ def generate_exercise(
     # Pedir ao Sage itens de exercício estruturados em JSON
     style_part = f" estilo {payload.style}." if payload.style else ""
     subject_part = f" assunto {payload.subject}." if payload.subject else ""
+    # Parâmetros inteligentes
+    pattern_mode = payload.pattern_mode or "auto"
+    closed_format = payload.closed_format or "auto"
+    fallback_mode = payload.fallback or "open"
+
     prompt = (
-        f"Gere {qty} questões (kind={kind}, difficulty={difficulty}){subject_part}{style_part} em JSON estrito: "
-        "{items: [ {question: string, kind: 'mcq'|'open', options?: string[4], answer?: string, "
-        "mcq?: {correct_index: 0..3, explanation: string}, open?: {model_answer: string, key_concepts: string[]} } ]}. "
-        "Garanta para mcq: exatamente 4 opções e 1 correta. Para open: inclua key_concepts (mín. 2)."
+        f"Gere {qty} questões (kind={kind}, difficulty={difficulty}, pattern_mode={pattern_mode}, closed_format={closed_format})"
+        f"{subject_part}{style_part} em JSON estrito: "
+        "{items: [ {question: string, kind: 'mcq'|'open'|'vf'|'multi', options?: string[], answer?: string, "
+        "mcq?: {correct_index?: 0..9, correct_indices?: number[], explanation?: string}, "
+        "vf?: {correct_vf: boolean, explanation?: string}, "
+        "open?: {model_answer: string, key_concepts: string[]} } ]}. "
+        "Se pattern_mode='strict' e closed_format='mcq', gere MCQ com 4 opções e 1 correta. "
+        "Se pattern_mode='auto', detecte padrões do contexto; se não houver padrão, gere 'open' com key_concepts (mín. 2)."
     )
     result = _call_openai_answer(context, prompt, level=2, lang=lang)
 
@@ -268,6 +277,7 @@ def generate_exercise(
                     raw_items.append({"question": str(b), "kind": "open"})
 
         created = 0
+        valid_closed = 0
         for r in raw_items:
             q = (r.get("question") or "").strip()
             k = (r.get("kind") or "open").strip()
@@ -280,9 +290,15 @@ def generate_exercise(
 
             if k == "mcq":
                 options = r.get("options") or r.get("options_json") or []
-                # validar 4 opções
-                if not isinstance(options, list) or len(options) != 4:
+                # Em modo strict: exigir 4 opções e 1 correta
+                if pattern_mode == "strict":
+                    if not isinstance(options, list) or len(options) != 4:
+                        continue
+                # Em modo auto: aceitar 2..6 opções
+                if not isinstance(options, list) or len(options) < 2:
                     continue
+                if len(options) > 6:
+                    options = options[:6]
                 mcq = r.get("mcq") or {}
                 if isinstance(mcq, str):
                     try:
@@ -290,12 +306,26 @@ def generate_exercise(
                     except Exception:
                         mcq = {}
                 correct_index = mcq.get("correct_index")
+                correct_indices = mcq.get("correct_indices")
                 explanation = mcq.get("explanation") or r.get("explanation")
-                if not isinstance(correct_index, int) or correct_index < 0 or correct_index > 3:
-                    continue
-                ans = {"correct_index": correct_index, "explanation": explanation or ""}
+                if pattern_mode == "strict":
+                    if not isinstance(correct_index, int) or correct_index < 0 or correct_index > 3:
+                        continue
+                    ans = {"correct_index": correct_index, "explanation": explanation or ""}
+                else:
+                    if correct_index is not None and isinstance(correct_index, int):
+                        ans = {"correct_index": correct_index, "explanation": explanation or ""}
+                    elif isinstance(correct_indices, list) and len(correct_indices) >= 1:
+                        ans = {"correct_indices": correct_indices, "explanation": explanation or ""}
+                    else:
+                        # sem gabarito claro, tratar como aberta orientada
+                        open_ans = {"model_answer": r.get("answer") or "", "key_concepts": []}
+                        db.add(models.ExerciseItem(exercise_id=ex.id, question=q, kind="open", answer_json=open_ans))
+                        created += 1
+                        continue
                 db.add(models.ExerciseItem(exercise_id=ex.id, question=q, kind="mcq", options_json=options, answer_json=ans))
                 created += 1
+                valid_closed += 1
             else:
                 # open
                 open_data = r.get("open") or {}
@@ -317,6 +347,21 @@ def generate_exercise(
 
             if created >= qty:
                 break
+
+        # Fallback se poucos closed válidos em modo auto
+        if pattern_mode == "auto" and kind in ("closed", "mix") and valid_closed < max(1, int(0.6 * qty)):
+            # Completar com abertas ou tópicos
+            missing = qty - created
+            if missing > 0:
+                for _ in range(missing):
+                    if fallback_mode == "topics":
+                        # tópico orientativo a partir de subject/style ou palavras do contexto
+                        topic_q = f"Estude os tópicos principais de {payload.subject or 'conteúdo'}"
+                        ans = {"key_concepts": []}
+                        db.add(models.ExerciseItem(exercise_id=ex.id, question=topic_q, kind="open", answer_json=ans))
+                    else:
+                        db.add(models.ExerciseItem(exercise_id=ex.id, question="Explique o conceito principal.", kind="open", answer_json={"model_answer": "", "key_concepts": []}))
+                created = qty
 
         if created == 0:
             db.add(models.ExerciseItem(exercise_id=ex.id, question="Explique o conceito principal.", kind="open", answer_json={"model_answer": "", "key_concepts": []}))

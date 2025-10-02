@@ -141,6 +141,9 @@ class ExerciseGenerateIn(BaseModel):
     difficulty: Optional[str] = Field(default="medium", pattern=r"^(easy|medium|hard)$")
     subject: Optional[str] = None
     style: Optional[str] = None
+    pattern_mode: Optional[str] = Field(default="auto", pattern=r"^(auto|strict|open_only)$")
+    closed_format: Optional[str] = Field(default="auto", pattern=r"^(auto|mcq|vf|multi)$")
+    fallback: Optional[str] = Field(default="open", pattern=r"^(open|topics)$")
     normalize: bool = True
     output_language: Optional[str] = "pt-BR"
 
