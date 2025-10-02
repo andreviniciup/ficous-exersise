@@ -145,6 +145,37 @@ def index_source_content(source: models.Source, db: Session) -> int:
     return indexed
 
 
+def calculate_advanced_perso_score(
+    similarity: float,
+    strength: float,
+    recency: float,
+    success_rate: float = 0.5,
+    frequency: int = 1,
+    concept_affinity: float = 0.5
+) -> float:
+    """
+    Calcula PersoScore avançado combinando múltiplos fatores
+    PersoScore = similarity × (0.3×strength + 0.25×recency + 0.2×success + 0.15×frequency + 0.1×affinity)
+    """
+    # Normalizar frequência (max 10 interações = 1.0)
+    normalized_frequency = min(1.0, frequency / 10.0)
+    
+    # Calcular personalização ponderada
+    personalization = (
+        0.3 * strength +
+        0.25 * recency +
+        0.2 * success_rate +
+        0.15 * normalized_frequency +
+        0.1 * concept_affinity
+    )
+    
+    # Aplicar decaimento temporal se recency < 0.5
+    if recency < 0.5:
+        personalization *= (0.5 + recency)  # Reduz peso se muito antigo
+    
+    return similarity * personalization
+
+
 def retrieve_relevant_chunks(
     query: str, 
     user_id: str, 
@@ -152,7 +183,7 @@ def retrieve_relevant_chunks(
     top_k: int = 5,
     discipline_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """Recupera chunks mais relevantes usando RAG + PersoScore"""
+    """Recupera chunks mais relevantes usando RAG + PersoScore Avançado"""
     
     # Embedding da query
     query_embedding = _get_embedding(query)
@@ -170,7 +201,7 @@ def retrieve_relevant_chunks(
     if not embeddings:
         return []
     
-    # Calcular similaridades
+    # Calcular similaridades e PersoScore avançado
     results = []
     for emb in embeddings:
         try:
@@ -180,11 +211,23 @@ def retrieve_relevant_chunks(
                 
             similarity = cosine_similarity([query_embedding], [vector])[0][0]
             
-            # PersoScore: similaridade × strength × recency
+            # Extrair metadados para PersoScore avançado
             meta = emb.meta or {}
             strength = meta.get("strength", 0.5)
             recency = meta.get("recency", 1.0)
-            perso_score = similarity * strength * recency
+            success_rate = meta.get("success_rate", 0.5)
+            frequency = meta.get("frequency", 1)
+            concept_affinity = meta.get("concept_affinity", 0.5)
+            
+            # Calcular PersoScore avançado
+            perso_score = calculate_advanced_perso_score(
+                similarity=similarity,
+                strength=strength,
+                recency=recency,
+                success_rate=success_rate,
+                frequency=frequency,
+                concept_affinity=concept_affinity
+            )
             
             results.append({
                 "chunk_text": emb.chunk_text,
@@ -192,7 +235,14 @@ def retrieve_relevant_chunks(
                 "perso_score": float(perso_score),
                 "owner_type": emb.owner_type,
                 "owner_id": str(emb.owner_id),
-                "meta": meta
+                "meta": meta,
+                "factors": {
+                    "strength": strength,
+                    "recency": recency,
+                    "success_rate": success_rate,
+                    "frequency": frequency,
+                    "concept_affinity": concept_affinity
+                }
             })
         except Exception:
             continue

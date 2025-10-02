@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from .. import models
 from .embeddings import _get_embedding
-from ..routers.sage import _call_openai_api
+from .openai_client import call_openai_api_simple
 
 
 def _should_update_summary(
@@ -70,7 +70,7 @@ def update_global_summary(user_id: str, db: Session) -> Optional[models.Summary]
             "Máximo 3 parágrafos, foco nos pontos mais importantes."
         )
         
-        summary_text = _call_openai_api(system_prompt, context[:4000])
+        summary_text = call_openai_api_simple(system_prompt, context[:4000])
         
         if global_summary:
             global_summary.text = summary_text
@@ -142,7 +142,7 @@ def update_discipline_summary(discipline_id: str, user_id: str, db: Session) -> 
             "Máximo 2 parágrafos, foco nos pontos mais importantes."
         )
         
-        summary_text = _call_openai_api(system_prompt, context[:3000])
+        summary_text = call_openai_api_simple(system_prompt, context[:3000])
         
         if discipline_summary:
             discipline_summary.text = summary_text

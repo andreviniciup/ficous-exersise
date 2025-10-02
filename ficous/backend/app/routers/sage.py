@@ -1,6 +1,6 @@
 import os
 from typing import List, Optional, Any
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from uuid import UUID
@@ -12,6 +12,9 @@ from ..utils import _clean_text
 from ..services.embeddings import retrieve_relevant_chunks, update_concept_strength
 from ..services.cache import get_cached_response, set_cached_response
 from ..services.summaries import update_global_summary, update_discipline_summary
+from ..services.circuit_breaker import call_openai_with_retry
+from ..utils.sanitization import sanitize_prompt, sanitize_context, validate_sage_input
+from ..middleware.rate_limiting import sage_rate_limit, SAGE_ANSWER_LIMITS
 
 
 router = APIRouter(prefix="/ficous/sage", tags=["ficous-sage"])
@@ -146,6 +149,7 @@ def _extract_concepts_and_tags(text: str, output_language: str = "pt-BR") -> tup
 class SageAnswerIn(BaseModel):
     # contexto
     note_id: Optional[UUID] = None
+    discipline_id: Optional[UUID] = None  # ADICIONADO: campo discipline_id
     raw_context: Optional[str] = Field(default=None, min_length=1)
     # pergunta/comando
     prompt: str = Field(min_length=1, max_length=2000)
@@ -245,6 +249,7 @@ def _call_openai_answer(context: str, prompt: str, level: int, lang: str) -> Sag
 @router.post("/answer", response_model=SageAnswerOut)
 def answer(
     payload: SageAnswerIn,
+    request: Request,
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
@@ -272,6 +277,16 @@ def answer(
     else:
         raise HTTPException(status_code=400, detail="Forneça note_id, discipline_id ou raw_context")
 
+    # 1.5. Validar e sanitizar inputs
+    is_valid, error_msg = validate_sage_input(payload.prompt, context)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Sanitizar prompt e contexto
+    sanitized_prompt = sanitize_prompt(payload.prompt)
+    if context:
+        context = sanitize_context(context)
+    
     # Normalização opcional
     if payload.normalize and isinstance(context, str):
         try:
@@ -290,7 +305,7 @@ def answer(
     # RAG: Recuperar chunks relevantes
     try:
         relevant_chunks = retrieve_relevant_chunks(
-            query=payload.prompt,
+            query=sanitized_prompt,
             user_id=str(user_id),
             db=db,
             top_k=3,
@@ -350,7 +365,7 @@ def answer(
     final_context = final_context[:max_context_len]
 
     # 3. Verificar cache
-    cached_response = get_cached_response(payload.prompt, final_context, "gpt-4o-mini")
+    cached_response = get_cached_response(sanitized_prompt, final_context, "gpt-4o-mini")
     if cached_response:
         # Registrar interação do cache
         try:
@@ -364,16 +379,16 @@ def answer(
             )
             db.add(interaction)
             db.commit()
-            return SageAnswerOut(answer=cached_response, interaction_id=interaction.id)
+            return SageAnswerOut(type=cached_response.get("type", "level1"), payload=cached_response.get("payload", {}))
         except Exception:
             pass
 
-    # 4. Chamar IA
-    result = _call_openai_answer(final_context, payload.prompt, payload.level, lang)
+    # 4. Chamar IA com circuit breaker
+    result = _call_openai_answer(final_context, sanitized_prompt, payload.level, lang)
     
     # 5. Armazenar no cache
     try:
-        set_cached_response(payload.prompt, final_context, result.model_dump(), "gpt-4o-mini")
+        set_cached_response(sanitized_prompt, final_context, result.model_dump(), "gpt-4o-mini")
     except Exception:
         pass
 
@@ -383,9 +398,9 @@ def answer(
             user_id=user_id,
             note_id=payload.note_id,
             discipline_id=payload.discipline_id,
-            prompt=payload.prompt,
+            prompt=sanitized_prompt,
             response_meta=result.model_dump(),
-            tokens_estimated=len(final_context.split()) + len(payload.prompt.split()) + 500
+            tokens_estimated=len(final_context.split()) + len(sanitized_prompt.split()) + 500
         )
         db.add(interaction)
         db.commit()
@@ -399,7 +414,7 @@ def answer(
         except Exception:
             pass
         
-        return SageAnswerOut(answer=result.model_dump(), interaction_id=interaction.id)
+        return result
     except Exception:
         return result
 

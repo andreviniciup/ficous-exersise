@@ -1,10 +1,17 @@
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.engine import URL
 from .config import DATABASE_URL
-import os
+import logging
 
+logger = logging.getLogger(__name__)
+
+# Variáveis globais para serem sobrescritas em testes
+engine = None
+SessionLocal = None
+Base = declarative_base()
 
 def _build_engine():
     """Constroi o engine do SQLAlchemy de forma robusta.
@@ -31,15 +38,22 @@ def _build_engine():
             port=port,
             database=db_name,
         )
+        logger.info(f"Building engine with separate DB variables for {drivername} on {db_host}:{port}/{db_name}")
         return create_engine(url)
+    else:
+        # Caso contrário, usa DATABASE_URL diretamente
+        logger.info(f"Building engine with DATABASE_URL: {DATABASE_URL}")
+        return create_engine(DATABASE_URL)
 
-    # Fallback para DATABASE_URL
-    url_str = DATABASE_URL
-    if url_str.startswith("sqlite"):
-        # Para SQLite, nenhuma configuração extra necessária aqui
-        return create_engine(url_str)
+def initialize_db():
+    global engine, SessionLocal
+    if engine is None:
+        engine = _build_engine()
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        logger.info("Database engine and session initialized.")
 
-    return create_engine(url_str)
+# Inicializa o banco de dados na importação
+initialize_db()
 
 
 engine = _build_engine()
