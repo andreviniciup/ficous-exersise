@@ -117,17 +117,68 @@ class ExerciseOut(BaseModel):
         from_attributes = True
 
 
+class ExerciseItemOut(BaseModel):
+    id: UUID
+    question: str
+    kind: str
+    options_json: Optional[Any] = None
+    answer_json: Optional[Any] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ExerciseDetailOut(ExerciseOut):
+    items: List[ExerciseItemOut] = []
+
+
 class ExerciseGenerateIn(BaseModel):
     note_id: Optional[UUID] = None
     raw_context: Optional[str] = Field(default=None, min_length=1)
+    source_id: Optional[UUID] = None
     qty: int = Field(default=5, ge=1, le=20)
     kind: str = Field(default="mix")
+    difficulty: Optional[str] = Field(default="medium", pattern=r"^(easy|medium|hard)$")
+    subject: Optional[str] = None
+    style: Optional[str] = None
     normalize: bool = True
     output_language: Optional[str] = "pt-BR"
 
 
 class ExerciseSubmitIn(BaseModel):
     answers_json: Any
+
+
+class ExerciseEvaluateIn(BaseModel):
+    item_id: UUID
+    answer_text: str
+    difficulty: Optional[str] = Field(default="medium", pattern=r"^(easy|medium|hard)$")
+
+
+class ExerciseEvaluateOut(BaseModel):
+    similarity: float
+    score: int
+    feedback: str
+    missing_concepts: List[str] = []
+
+
+class ExerciseGradeIn(BaseModel):
+    answers_json: Any
+
+
+class ItemResult(BaseModel):
+    item_id: UUID
+    correct: Optional[bool] = None
+    explanation: Optional[str] = None
+    similarity: Optional[float] = None
+    score: Optional[int] = None
+    feedback: Optional[str] = None
+
+
+class ExerciseGradeOut(BaseModel):
+    exercise_id: UUID
+    score: Any
+    items_results: List[ItemResult]
 
 
 # -----------------
