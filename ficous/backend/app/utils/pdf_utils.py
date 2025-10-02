@@ -116,3 +116,25 @@ def extract_text_from_pdf_bytes(
     if len(text) > mchars:
         return text[:mchars]
     return text
+
+
+def extract_text_from_image(image_bytes: bytes) -> str:
+    """Extrai texto de imagem usando OCR"""
+    try:
+        from PIL import Image
+        import pytesseract
+        import io
+        
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Configurar tesseract para português
+        custom_config = r'--oem 3 --psm 6 -l por'
+        text = pytesseract.image_to_string(img, config=custom_config)
+        
+        return text.strip()
+    except ImportError:
+        raise RuntimeError(
+            "Pytesseract não instalado. Instale com: pip install pytesseract"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Erro no OCR: {e}")

@@ -97,53 +97,64 @@ def evaluate_open_answer(
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
-    item = db.query(models.ExerciseItem).join(models.Exercise, models.ExerciseItem.exercise_id == models.Exercise.id).filter(
+    from ..services.exercise_processing import evaluate_open_answer_semantic
+    
+    # Buscar item
+    item = db.query(models.ExerciseItem).join(
+        models.Exercise, 
+        models.ExerciseItem.exercise_id == models.Exercise.id
+    ).filter(
         models.ExerciseItem.id == payload.item_id,
         models.Exercise.user_id == user_id
     ).first()
+    
     if not item:
         raise HTTPException(status_code=404, detail="Item não encontrado")
+    
     if item.kind != "open":
-        raise HTTPException(status_code=400, detail="Avaliação semântica é apenas para questões abertas")
-
-    # Extrair resposta modelo e conceitos
-    model_answer = None
-    key_concepts: List[str] = []
+        raise HTTPException(
+            status_code=400, 
+            detail="Avaliação semântica é apenas para questões abertas"
+        )
+    
+    # Extrair dados da resposta modelo
     try:
         ans = item.answer_json or {}
         if isinstance(ans, str):
             ans = json.loads(ans)
-        model_answer = ans.get("model_answer") or ""
-        key_concepts = ans.get("key_concepts") or []
+        
+        reference_embedding_json = ans.get("reference_embedding")
+        if not reference_embedding_json:
+            # Fallback: gerar embedding agora
+            model_answer = ans.get("model_answer", "")
+            reference_text = model_answer if model_answer else item.question
+            from ..services.embeddings import _get_embedding
+            reference_embedding = _get_embedding(reference_text)
+        else:
+            reference_embedding = json.loads(reference_embedding_json)
+        
+        key_concepts = ans.get("key_concepts", [])
+        similarity_threshold = ans.get("similarity_threshold", 0.70)
+        
     except Exception:
-        model_answer = ""
-        key_concepts = []
-
-    # Embeddings e similaridade
-    ref_text = model_answer if model_answer else item.question
-    vec_ref = _get_embedding(ref_text)
-    vec_ans = _get_embedding(payload.answer_text)
-    sim = float(cosine_similarity([vec_ans], [vec_ref])[0][0])
-
-    # Threshold por dificuldade
-    thresholds = {"easy": 0.65, "medium": 0.70, "hard": 0.75}
-    th = thresholds.get(payload.difficulty or "medium", 0.70)
-
-    # Heurística simples de score 0-10
-    score = max(0, min(10, int(round((sim - th + 0.3) / 0.3 * 10))))  # janela de 0.3 acima do threshold
-
-    # Feedback básico baseado em conceitos ausentes
-    missing = []
-    for concept in key_concepts:
-        if concept.lower() not in (payload.answer_text or "").lower():
-            missing.append(concept)
-    feedback = "Boa resposta." if not missing else f"Faltou abordar: {', '.join(missing)}"
-
+        raise HTTPException(
+            status_code=500, 
+            detail="Erro ao processar resposta modelo"
+        )
+    
+    # Avaliar usando pipeline de pós-processamento
+    evaluation = evaluate_open_answer_semantic(
+        student_answer=payload.answer_text,
+        reference_embedding=reference_embedding,
+        key_concepts=key_concepts,
+        similarity_threshold=similarity_threshold
+    )
+    
     return schemas.ExerciseEvaluateOut(
-        similarity=sim,
-        score=score,
-        feedback=feedback,
-        missing_concepts=missing
+        similarity=evaluation["similarity"],
+        score=evaluation["score"],
+        feedback=evaluation["feedback"],
+        missing_concepts=evaluation["missing_concepts"]
     )
 
 
@@ -217,159 +228,191 @@ def generate_exercise(
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
+    # 1. OBTER CONTEXTO
     context = None
     if payload.note_id:
-        note = db.query(models.Note).filter(models.Note.id == payload.note_id, models.Note.user_id == user_id).first()
+        note = db.query(models.Note).filter(
+            models.Note.id == payload.note_id, 
+            models.Note.user_id == user_id
+        ).first()
         if not note:
             raise HTTPException(status_code=404, detail="Nota não encontrada")
         context = note.content or ""
     elif payload.source_id:
-        src = db.query(Source).filter(Source.id == payload.source_id, Source.user_id == user_id).first()
+        src = db.query(models.Source).filter(
+            models.Source.id == payload.source_id, 
+            models.Source.user_id == user_id
+        ).first()
         if not src:
             raise HTTPException(status_code=404, detail="Fonte não encontrada")
         context = (src.content_excerpt or "").strip()
         if not context:
-            # fallback leve: sem carregar arquivo todo; usamos excerpt já salvo no upload
-            raise HTTPException(status_code=400, detail="Fonte sem conteúdo extraído. Refaça upload com PDF válido.")
+            raise HTTPException(
+                status_code=400, 
+                detail="Fonte sem conteúdo extraído. Refaça upload com PDF válido."
+            )
     elif payload.raw_context:
         context = payload.raw_context
     else:
-        raise HTTPException(status_code=400, detail="Forneça note_id, raw_context ou source_id")
+        raise HTTPException(
+            status_code=400, 
+            detail="Forneça note_id, raw_context ou source_id"
+        )
 
+    # 2. PRÉ-PROCESSAMENTO
+    from ..services.exercise_processing import (
+        preprocess_exercise_content,
+        detect_question_patterns,
+        postprocess_mcq_questions,
+        postprocess_open_questions
+    )
+    
+    preprocessed = preprocess_exercise_content(context)
+    
+    if not preprocessed["validation"]["valid"]:
+        raise HTTPException(
+            status_code=400,
+            detail=preprocessed["validation"]["reason"]
+        )
+    
+    clean_context = preprocessed["clean_text"]
+    topics = preprocessed["topics"]
+    entities = preprocessed["entities"]
+    
+    # 3. DETECÇÃO DE PADRÕES (se pattern_mode='auto')
+    pattern_mode = payload.pattern_mode or "auto"
+    if pattern_mode == "auto":
+        pattern_info = detect_question_patterns(clean_context)
+        # Ajustar closed_format baseado no padrão detectado
+        if pattern_info["confidence"] > 0.6:
+            payload.closed_format = pattern_info["recommended_format"]
+    
+    # 4. PREPARAR PROMPT ENRIQUECIDO
     lang = (payload.output_language or "pt-BR").strip()
     qty = payload.qty
     kind = payload.kind
     difficulty = payload.difficulty or "medium"
-
-    # Pedir ao Sage itens de exercício estruturados em JSON
+    
     style_part = f" estilo {payload.style}." if payload.style else ""
     subject_part = f" assunto {payload.subject}." if payload.subject else ""
-    # Parâmetros inteligentes
-    pattern_mode = payload.pattern_mode or "auto"
-    closed_format = payload.closed_format or "auto"
-    fallback_mode = payload.fallback or "open"
-
+    
+    # Adicionar tópicos extraídos ao prompt
+    topics_hint = f" Tópicos identificados: {', '.join(topics)}." if topics else ""
+    
     prompt = (
-        f"Gere {qty} questões (kind={kind}, difficulty={difficulty}, pattern_mode={pattern_mode}, closed_format={closed_format})"
-        f"{subject_part}{style_part} em JSON estrito: "
-        "{items: [ {question: string, kind: 'mcq'|'open'|'vf'|'multi', options?: string[], answer?: string, "
-        "mcq?: {correct_index?: 0..9, correct_indices?: number[], explanation?: string}, "
-        "vf?: {correct_vf: boolean, explanation?: string}, "
-        "open?: {model_answer: string, key_concepts: string[]} } ]}. "
-        "Se pattern_mode='strict' e closed_format='mcq', gere MCQ com 4 opções e 1 correta. "
-        "Se pattern_mode='auto', detecte padrões do contexto; se não houver padrão, gere 'open' com key_concepts (mín. 2)."
+        f"Gere {qty} questões (kind={kind}, difficulty={difficulty}, "
+        f"pattern_mode={pattern_mode}, closed_format={payload.closed_format})"
+        f"{subject_part}{style_part}{topics_hint} em JSON estrito:\n"
+        "{\n"
+        '  "items": [\n'
+        '    {\n'
+        '      "question": "string",\n'
+        '      "kind": "mcq|open|vf",\n'
+        '      "options": ["opt1", "opt2", ...],  // para mcq/vf\n'
+        '      "mcq": {\n'
+        '        "correct_index": 0,\n'
+        '        "explanation": "string"\n'
+        '      },\n'
+        '      "open": {\n'
+        '        "model_answer": "string",\n'
+        '        "key_concepts": ["conceito1", "conceito2"]\n'
+        '      }\n'
+        '    }\n'
+        '  ]\n'
+        '}\n\n'
+        f"Regras:\n"
+        f"- Se pattern_mode='strict' e closed_format='mcq': gere MCQ com exatamente 4 opções e 1 correta\n"
+        f"- Se pattern_mode='auto': detecte padrões do contexto; sem padrão claro → gere 'open'\n"
+        f"- Para questões 'open': sempre inclua pelo menos 2 key_concepts\n"
+        f"- Dificuldade '{difficulty}': ajuste complexidade adequadamente\n"
     )
-    result = _call_openai_answer(context, prompt, level=2, lang=lang)
-
-    ex = models.Exercise(user_id=user_id, title="Exercícios gerados", meta_json={"qty": qty, "kind": kind, "difficulty": difficulty, "subject": payload.subject, "style": payload.style, "status": "ready"})
-    db.add(ex)
-    db.commit()
-    db.refresh(ex)
-
+    
+    # 5. CHAMADA À IA
+    result = _call_openai_answer(clean_context, prompt, level=2, lang=lang)
+    
+    # 6. PÓS-PROCESSAMENTO
     try:
         data = result.payload or {}
         raw_items = data.get("items") or []
-        # Compatibilidade: alguns modelos retornam 'slides/bullets'
-        if not raw_items and data.get("slides"):
-            raw_items = []
-            for sl in (data.get("slides") or []):
-                for b in (sl.get("bullets") or []):
-                    raw_items.append({"question": str(b), "kind": "open"})
-
-        created = 0
-        valid_closed = 0
-        for r in raw_items:
-            q = (r.get("question") or "").strip()
-            k = (r.get("kind") or "open").strip()
-            if not q:
-                continue
-            if kind == "closed":
-                k = "mcq"
-            elif kind == "open":
-                k = "open"
-
-            if k == "mcq":
-                options = r.get("options") or r.get("options_json") or []
-                # Em modo strict: exigir 4 opções e 1 correta
-                if pattern_mode == "strict":
-                    if not isinstance(options, list) or len(options) != 4:
-                        continue
-                # Em modo auto: aceitar 2..6 opções
-                if not isinstance(options, list) or len(options) < 2:
-                    continue
-                if len(options) > 6:
-                    options = options[:6]
-                mcq = r.get("mcq") or {}
-                if isinstance(mcq, str):
-                    try:
-                        mcq = json.loads(mcq)
-                    except Exception:
-                        mcq = {}
-                correct_index = mcq.get("correct_index")
-                correct_indices = mcq.get("correct_indices")
-                explanation = mcq.get("explanation") or r.get("explanation")
-                if pattern_mode == "strict":
-                    if not isinstance(correct_index, int) or correct_index < 0 or correct_index > 3:
-                        continue
-                    ans = {"correct_index": correct_index, "explanation": explanation or ""}
-                else:
-                    if correct_index is not None and isinstance(correct_index, int):
-                        ans = {"correct_index": correct_index, "explanation": explanation or ""}
-                    elif isinstance(correct_indices, list) and len(correct_indices) >= 1:
-                        ans = {"correct_indices": correct_indices, "explanation": explanation or ""}
-                    else:
-                        # sem gabarito claro, tratar como aberta orientada
-                        open_ans = {"model_answer": r.get("answer") or "", "key_concepts": []}
-                        db.add(models.ExerciseItem(exercise_id=ex.id, question=q, kind="open", answer_json=open_ans))
-                        created += 1
-                        continue
-                db.add(models.ExerciseItem(exercise_id=ex.id, question=q, kind="mcq", options_json=options, answer_json=ans))
-                created += 1
-                valid_closed += 1
-            else:
-                # open
-                open_data = r.get("open") or {}
-                if isinstance(open_data, str):
-                    try:
-                        open_data = json.loads(open_data)
-                    except Exception:
-                        open_data = {}
-                model_answer = open_data.get("model_answer") or r.get("answer") or ""
-                key_concepts = open_data.get("key_concepts") or []
-                if not key_concepts or len(key_concepts) < 2:
-                    # pequena heurística: extrair 2 palavras-chave do enunciado se faltar
-                    words = [w for w in q.split() if len(w) > 4][:2]
-                    if words:
-                        key_concepts = words
-                ans = {"model_answer": model_answer, "key_concepts": key_concepts}
-                db.add(models.ExerciseItem(exercise_id=ex.id, question=q, kind="open", answer_json=ans))
-                created += 1
-
-            if created >= qty:
-                break
-
-        # Fallback se poucos closed válidos em modo auto
-        if pattern_mode == "auto" and kind in ("closed", "mix") and valid_closed < max(1, int(0.6 * qty)):
-            # Completar com abertas ou tópicos
-            missing = qty - created
-            if missing > 0:
-                for _ in range(missing):
-                    if fallback_mode == "topics":
-                        # tópico orientativo a partir de subject/style ou palavras do contexto
-                        topic_q = f"Estude os tópicos principais de {payload.subject or 'conteúdo'}"
-                        ans = {"key_concepts": []}
-                        db.add(models.ExerciseItem(exercise_id=ex.id, question=topic_q, kind="open", answer_json=ans))
-                    else:
-                        db.add(models.ExerciseItem(exercise_id=ex.id, question="Explique o conceito principal.", kind="open", answer_json={"model_answer": "", "key_concepts": []}))
-                created = qty
-
-        if created == 0:
-            db.add(models.ExerciseItem(exercise_id=ex.id, question="Explique o conceito principal.", kind="open", answer_json={"model_answer": "", "key_concepts": []}))
-        db.commit()
-    except Exception:
-        db.add(models.ExerciseItem(exercise_id=ex.id, question="Explique o conceito principal.", kind="open"))
-        db.commit()
-
+        
+        # Separar por tipo
+        mcq_items = [item for item in raw_items if item.get("kind") == "mcq"]
+        open_items = [item for item in raw_items if item.get("kind") == "open"]
+        
+        # Validar MCQs
+        validated_mcq = postprocess_mcq_questions(mcq_items, pattern_mode, difficulty)
+        
+        # Processar questões abertas
+        processed_open = postprocess_open_questions(open_items, difficulty)
+        
+        # Combinar
+        final_items = validated_mcq + processed_open
+        
+        # Fallback se muito poucas questões válidas
+        if len(final_items) < max(1, int(0.5 * qty)):
+            # Completar com questões abertas genéricas
+            missing = qty - len(final_items)
+            for topic in topics[:missing]:
+                final_items.append({
+                    "question": f"Explique o conceito de {topic} e sua aplicação prática.",
+                    "kind": "open",
+                    "answer_json": {
+                        "model_answer": "",
+                        "key_concepts": [topic],
+                        "meta": {"difficulty": difficulty, "generated_fallback": True}
+                    }
+                })
+        
+    except Exception as e:
+        # Fallback total em caso de erro
+        final_items = [{
+            "question": "Explique os conceitos principais do conteúdo fornecido.",
+            "kind": "open",
+            "answer_json": {
+                "model_answer": "",
+                "key_concepts": topics[:3] if topics else [],
+                "meta": {"difficulty": difficulty, "error_fallback": True}
+            }
+        }]
+    
+    # 7. SALVAR NO BANCO
+    ex = models.Exercise(
+        user_id=user_id,
+        discipline_id=payload.discipline_id if hasattr(payload, 'discipline_id') else None,
+        note_id=payload.note_id,
+        title=f"Exercícios: {payload.subject or 'Geral'}",
+        meta_json={
+            "qty": qty,
+            "kind": kind,
+            "difficulty": difficulty,
+            "subject": payload.subject,
+            "style": payload.style,
+            "status": "ready",
+            "preprocessing": {
+                "topics": topics,
+                "entities": entities,
+                "word_count": preprocessed["validation"]["word_count"]
+            }
+        }
+    )
+    db.add(ex)
+    db.commit()
+    db.refresh(ex)
+    
+    # Adicionar items
+    for item_data in final_items[:qty]:
+        item = models.ExerciseItem(
+            exercise_id=ex.id,
+            question=item_data["question"],
+            kind=item_data["kind"],
+            options_json=item_data.get("options"),
+            answer_json=item_data.get("answer_json", item_data.get("mcq"))
+        )
+        db.add(item)
+    
+    db.commit()
+    db.refresh(ex)
+    
     return ex
 
 

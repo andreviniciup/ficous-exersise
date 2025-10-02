@@ -39,11 +39,21 @@ async def upload_source(
     mime = file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
 
     excerpt: str | None = None
+    
+    # Suporte a PDF
     if mime == "application/pdf":
         try:
             excerpt = extract_text_from_pdf_bytes(data, max_pages=5, max_chars=2000, clean=True)
         except Exception:
             excerpt = None
+    
+    # NOVO: Suporte a imagens
+    elif mime.startswith("image/"):
+        try:
+            from ..utils.pdf_utils import extract_text_from_image
+            excerpt = extract_text_from_image(data)[:2000]
+        except Exception as e:
+            excerpt = f"Erro no OCR: {e}"
 
     src = models.Source(
         user_id=user_id,
