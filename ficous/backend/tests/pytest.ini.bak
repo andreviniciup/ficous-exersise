@@ -1,0 +1,53 @@
+[pytest]
+# Configuração do pytest para Ficous Backend
+
+# Diretório dos testes
+testpaths = tests
+
+# Padrão de arquivos de teste
+python_files = test_*.py
+
+# Padrão de classes de teste
+python_classes = Test*
+
+# Padrão de funções de teste
+python_functions = test_*
+
+# Opções padrão
+addopts =
+    -v                          # Verbose
+    --strict-markers            # Markers devem ser registrados
+    --tb=short                  # Traceback curto
+    --disable-warnings          # Desabilitar warnings
+    -p no:cacheprovider         # Desabilitar cache do pytest
+    --cov=ficous/backend/app    # Cobertura de código
+    --cov-report=term-missing   # Mostrar linhas não cobertas
+    --cov-report=html           # Gerar relatório HTML
+    --durations=10              # Mostrar 10 testes mais lentos
+
+# Markers customizados
+markers =
+    slow: marca testes que são lentos (desselecione com '-m "not slow"')
+    integration: marca testes de integração
+    unit: marca testes unitários
+    sage: marca testes específicos do Sage
+    rag: marca testes do sistema RAG
+    cache: marca testes do sistema de cache
+
+# Configuração de cobertura
+[coverage:run]
+omit =
+    */tests/*
+    */venv/*
+    */__pycache__/*
+    */site-packages/*
+
+[coverage:report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
