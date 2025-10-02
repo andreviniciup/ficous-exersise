@@ -54,24 +54,18 @@ export interface Flashcard {
   created_at: string;
 }
 
-export interface Exercise {
-  id: string;
-  user_id: string;
-  discipline_id?: string;
-  note_id?: string;
-  title: string;
-  created_at: string;
-  items: ExerciseItem[];
-}
-
-export interface ExerciseItem {
-  id: string;
-  exercise_id: string;
-  question: string;
-  options_json?: string[];
-  correct_answer?: string;
-  kind: string;
-}
+// Importar tipos atualizados
+import type { 
+  Exercise, 
+  ExerciseItem, 
+  ExerciseDetailOut,
+  ExerciseGenerateIn,
+  ExerciseEvaluateIn,
+  ExerciseEvaluateOut,
+  ExerciseGradeIn,
+  ExerciseGradeOut,
+  ExerciseFilters
+} from '../types/exercises';
 
 export interface Source {
   id: string;
@@ -302,15 +296,34 @@ class FicousAPI {
     });
   }
 
-  // Exercícios
-  async getExercises(): Promise<Exercise[]> {
-    return this.request<Exercise[]>('/ficous/exercises/');
+  // Exercícios - API completa
+  async getExercises(filters?: ExerciseFilters): Promise<Exercise[]> {
+    const params = new URLSearchParams();
+    if (filters?.kind) params.append('kind', filters.kind);
+    if (filters?.difficulty) params.append('difficulty', filters.difficulty);
+    if (filters?.tag) params.append('tag', filters.tag);
+    if (filters?.limit) params.append('limit', filters.limit.toString());
+    if (filters?.offset) params.append('offset', filters.offset.toString());
+    
+    const query = params.toString();
+    return this.request<Exercise[]>(`/ficous/exercises/${query ? `?${query}` : ''}`);
+  }
+
+  async getExerciseDetail(id: string): Promise<ExerciseDetailOut> {
+    return this.request<ExerciseDetailOut>(`/ficous/exercises/${id}`);
   }
 
   async createExercise(data: {
     discipline_id?: string;
     note_id?: string;
     title: string;
+    meta_json?: any;
+    items: Array<{
+      question: string;
+      kind: string;
+      options_json?: any;
+      answer_json?: any;
+    }>;
   }): Promise<Exercise> {
     return this.request<Exercise>('/ficous/exercises/', {
       method: 'POST',
@@ -318,23 +331,31 @@ class FicousAPI {
     });
   }
 
-  async generateExercise(data: {
-    note_id?: string;
-    discipline_id?: string;
-    raw_context?: string;
-    count?: number;
-    language?: string;
-  }): Promise<Exercise> {
+  async generateExercise(data: ExerciseGenerateIn): Promise<Exercise> {
     return this.request<Exercise>('/ficous/exercises/generate', {
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async submitExercise(id: string, answers: any[]): Promise<{ score: number; feedback: any }> {
-    return this.request<{ score: number; feedback: any }>(`/ficous/exercises/${id}/submit`, {
+  async evaluateExercise(data: ExerciseEvaluateIn): Promise<ExerciseEvaluateOut> {
+    return this.request<ExerciseEvaluateOut>('/ficous/exercises/evaluate', {
       method: 'POST',
-      body: JSON.stringify({ answers }),
+      body: JSON.stringify(data),
+    });
+  }
+
+  async gradeExercise(id: string, data: ExerciseGradeIn): Promise<ExerciseGradeOut> {
+    return this.request<ExerciseGradeOut>(`/ficous/exercises/${id}/grade`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async submitExercise(id: string, answers: any[]): Promise<Exercise> {
+    return this.request<Exercise>(`/ficous/exercises/${id}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ answers_json: answers }),
     });
   }
 
